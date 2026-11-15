@@ -1,0 +1,35 @@
+[package]
+name = "chatdesk-web"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny Windows shell around chat.google.com: an app window, not a browser."
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+
+[dependencies]
+anyhow = "1"
+open = "5"
+tao = "0.37"
+tray-icon = "0.26"
+wry = "0.57"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+incremental = false
+overflow-checks = false
+debug = false

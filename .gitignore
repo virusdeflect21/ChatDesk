@@ -1,0 +1,13 @@
+# Build output
+/target/
+
+# Backups / scratch snapshots
+/backup_*/
+*.bak
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
