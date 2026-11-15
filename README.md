@@ -29,6 +29,10 @@ No setup required: no Google Cloud project, no OAuth client, no API keys. Whatev
 
 ## Install
 
+### Download
+
+Grab `ChatDesk-v0.1.0-windows-x64.exe` from the [latest release](https://github.com/virusdeflect21/ChatDesk/releases/latest). No installer, no runtime to fetch — just run it. The build is unsigned, so SmartScreen may warn on first launch.
+
 ### From source
 
 ```powershell
