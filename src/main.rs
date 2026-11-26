@@ -1300,6 +1300,7 @@ fn install_native_notification_hook(webview: &WebView, proxy: EventLoopProxy<Use
 }
 
 /// Copies and frees a COM-allocated wide string.
+#[cfg(windows)]
 fn take_wide(value: windows::core::PWSTR) -> String {
     if value.is_null() {
         return String::new();
@@ -1339,6 +1340,8 @@ fn apply_badge(
     taskbar: &Taskbar,
     icon: &tray_icon::Icon,
 ) {
+    #[cfg(not(windows))]
+    let _ = taskbar;
     if let Some(tray_icon) = tray.borrow().as_ref() {
         let _ = tray_icon.set_icon(Some(icon.clone()));
         let _ = tray_icon.set_tooltip(Some(if on {
