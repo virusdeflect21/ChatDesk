@@ -789,8 +789,9 @@ fn run(
                 let self_test = std::env::var_os("CHATDESK_WEB_TEST_NOTIFY").is_some();
                 // Replays of already-pending messages right after (re)load are
                 // not news; the unread badge still covers them.
-                let replay = chat_loaded_at
-                    .map_or(true, |at| at.elapsed() < Duration::from_secs(NOTIFY_GRACE_SECS));
+                let replay = chat_loaded_at.is_none_or(|at| {
+                    at.elapsed() < Duration::from_secs(NOTIFY_GRACE_SECS)
+                });
                 let mut shown = false;
                 if self_test || (hidden && !duplicate && !replay) {
                     shown = show_tray_balloon(&title, &body);
@@ -1038,7 +1039,7 @@ fn register_app_identity() {
 /// A single-image 32bpp .ico built from straight RGBA bytes.
 fn ico_bytes(rgba: &[u8], size: u32) -> Vec<u8> {
     let pixels = (size * size * 4) as usize;
-    let mask_row = (((size + 31) / 32) * 4) as usize;
+    let mask_row = (size.div_ceil(32) * 4) as usize;
     let image_len = 40 + pixels + mask_row * size as usize;
     let mut out = Vec::with_capacity(22 + image_len);
     // ICONDIR + one ICONDIRENTRY.
@@ -1233,7 +1234,7 @@ fn apply_badge(
     } else {
         WINDOW_TITLE.to_string()
     };
-    let _ = window.set_title(&title);
+    window.set_title(&title);
     let overlay = if on {
         overlay_on.unwrap_or(HICON(std::ptr::null_mut()))
     } else {
@@ -1315,7 +1316,7 @@ fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<HICON> {
             dst[source + 3] = rgba[source + 3];
         }
 
-        let mask_stride = (((size + 31) / 32) * 4) as usize;
+        let mask_stride = (size.div_ceil(32) * 4) as usize;
         let mask_bytes = vec![0u8; mask_stride * size as usize];
         let hbm_mask = CreateBitmap(
             size as i32,
@@ -1416,12 +1417,14 @@ fn show_tray_balloon(title: &str, body: &str) -> bool {
     let body = if body.trim().is_empty() { "New message" } else { body };
 
     unsafe {
-        let mut data = NOTIFYICONDATAW::default();
-        data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-        data.hWnd = hwnd;
-        data.uID = tray_icon_id(hwnd);
-        data.uFlags = NIF_INFO;
-        data.dwInfoFlags = NIIF_INFO;
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: tray_icon_id(hwnd),
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_INFO,
+            ..Default::default()
+        };
         copy_wide(&mut data.szInfoTitle, title);
         copy_wide(&mut data.szInfo, body);
         data.Anonymous.uTimeout = 6000;
