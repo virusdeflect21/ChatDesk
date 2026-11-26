@@ -4,15 +4,15 @@
 
 **Google Chat in an app window, not a browser tab.**
 
-A tiny native Windows shell around [chat.google.com](https://chat.google.com) —
-Rust · [tao](https://docs.rs/tao) · [wry](https://docs.rs/wry) · WebView2.
+A tiny native shell around [chat.google.com](https://chat.google.com) for
+**Windows, Linux and macOS** — Rust · [tao](https://docs.rs/tao) · [wry](https://docs.rs/wry).
 
 [![Release](https://img.shields.io/github/v/release/virusdeflect21/ChatDesk?sort=semver&display_name=tag&label=release&cacheSeconds=3600)](https://github.com/virusdeflect21/ChatDesk/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078d4?logo=windows11)](#system-requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-0078d4)](#system-requirements)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-b7410e?logo=rust)](https://www.rust-lang.org)
 
-*A ~0.7 MB executable that turns Google Chat's web client into a proper desktop app: tray icon, unread badge, balloon notifications, launch-at-login — and roughly half the RAM and CPU of a browser tab.*
+*A ~0.7 MB executable that turns Google Chat's web client into a proper desktop app: tray icon, unread badge, notifications, launch-at-login, window memory, zoom — and a fraction of the RAM and CPU of a browser tab.*
 
 </div>
 
@@ -28,7 +28,13 @@ No setup: no Google Cloud project, no OAuth client, no API keys, and no Google C
 
 ## Features
 
-### New in v0.2.0
+### New in v0.2.1
+- **Linux and macOS builds** — the same app now ships for Windows, Linux (X11, webkit2gtk) and macOS (WKWebView); autoboot works everywhere (`Run` key on Windows, `~/.config/autostart` on Linux, LaunchAgent on macOS).
+- **Links always open in your browser** — a plain click is enough (no modifier key): anything that isn't Chat itself — Docs, Drive, Meet, Calendar, external sites — hands off to your default browser instead of being silently blocked.
+- **Even less RAM** — V8 heap cap 128→96 MB, disk cache 16→8 MB, idle trims 20→15 s, hidden trims 30→20 s.
+- **Off-screen window guard** — if a monitor was unplugged, the window resets to a visible position instead of restoring off-screen.
+
+### v0.2.0
 - **Start with Windows (autoboot)** — flip one switch in the tray menu and ChatDesk launches at login. Flip it again to turn it off.
 - **Start hidden in tray** — optionally boot quietly to the tray instead of opening a window.
 - **Remembers your window** — size, position and maximized state come back where you left them.
@@ -70,8 +76,8 @@ Advanced knobs: `CHATDESK_WEB_FULL_JIT=1` (full JS speed), `CHATDESK_WEB_SOFTWAR
 
 | | Minimum |
 |---|---|
-| OS | Windows 10 (1803+) or Windows 11, 64-bit |
-| Runtime | [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) — preinstalled on up-to-date Windows 11 and most Windows 10 |
+| OS | Windows 10 (1803+) / 11 · Ubuntu 22.04+/Debian 12+ (X11, GTK 3 + webkit2gtk 4.1) · macOS 12+ (Apple silicon) |
+| Runtime | Windows: [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on most systems). Linux: `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1`. macOS: none beyond the OS. |
 | RAM | 4 GB (works comfortably in 2 GB) |
 | Disk | ~10 MB app + ~100 MB profile |
 | Network | Internet access to `chat.google.com` |
@@ -82,17 +88,26 @@ Nothing else. No .NET, no installer service, no admin rights.
 
 ### Download (recommended)
 
-1. Grab `ChatDesk-vX.Y.Z-windows-x64.exe` from the **[latest release](https://github.com/virusdeflect21/ChatDesk/releases/latest)**.
-2. Put it anywhere (`%LOCALAPPDATA%\ChatDesk` is a nice home) and run it.
-3. Sign in with your Google account. Done — next launches go straight to Chat.
+1. Grab the build for your OS from the **[latest release](https://github.com/virusdeflect21/ChatDesk/releases/latest)**:
+   - **Windows** — `ChatDesk-vX.Y.Z-windows-x64.exe`. Put it anywhere (`%LOCALAPPDATA%\ChatDesk` is a nice home) and run it. The build is unsigned, so SmartScreen may show "Windows protected your PC" — click **More info → Run anyway**.
+   - **Linux** — `ChatDesk-vX.Y.Z-linux-x64.tar.gz`. Unpack and run:
+     ```bash
+     tar -xzf ChatDesk-vX.Y.Z-linux-x64.tar.gz
+     ./chatdesk-web
+     ```
+   - **macOS** — `ChatDesk-vX.Y.Z-macos-arm64.tar.gz`. Unpack and run:
+     ```bash
+     tar -xzf ChatDesk-vX.Y.Z-macos-arm64.tar.gz
+     ./chatdesk-web
+     ```
+     Gatekeeper may warn about an unidentified developer: right-click the binary → **Open**.
+2. Sign in with your Google account. Done — next launches go straight to Chat.
 
-The build is unsigned, so SmartScreen may show "Windows protected your PC" on first run — click **More info → Run anyway**.
-
-To enable **autoboot**, right-click the tray icon → **Start with Windows**. To have it boot quietly instead of opening a window, also tick **Start hidden in tray**.
+To enable **autoboot**, open the tray menu → **Start with Windows** (the same switch writes the platform-appropriate login entry on Linux and macOS). To have it boot quietly instead of opening a window, also tick **Start hidden in tray**.
 
 ### Uninstall
 
-Just delete the exe. For a full wipe, also remove `%LOCALAPPDATA%\ChatDeskWeb` (profile + settings). If you enabled autoboot, untick it first — or delete the `ChatDesk` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+Just delete the binary. For a full wipe, also remove the data directory — `%LOCALAPPDATA%\ChatDeskWeb` (Windows), `~/.config/ChatDeskWeb` (Linux) or `~/Library/Application Support/ChatDeskWeb` (macOS). If you enabled autoboot, untick it first.
 
 ## Build from source
 
@@ -103,7 +118,7 @@ cargo build --release
 .\target\release\chatdesk-web.exe
 ```
 
-Requirements: the [Rust toolchain](https://rustup.rs) (msvc toolchain) and WebView2 (for running). Or just `cargo run --release`.
+Requirements: the [Rust toolchain](https://rustup.rs). On Windows use the msvc toolchain; on Linux also install `pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`. Or just `cargo run --release`.
 
 ## Troubleshooting
 
@@ -111,7 +126,7 @@ Requirements: the [Rust toolchain](https://rustup.rs) (msvc toolchain) and WebVi
 |---|---|
 | "Microsoft Edge WebView2 could not start" | Install the [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
 | Session wedged / wrong account signed in | Tray → **Reset app data**, or delete `%LOCALAPPDATA%\ChatDeskWeb\profile`. |
-| Window off-screen after a monitor change | Delete `%LOCALAPPDATA%\ChatDeskWeb\settings.txt`; geometry resets to defaults. |
+| Window restored off-screen | Should not happen anymore (v0.2.1 guards it); to reset geometry, delete the settings file in the data directory. |
 | Autoboot didn't stick | Some machines (corporate policy) block per-user Run entries; add ChatDesk to Task Manager → Startup apps instead. |
 | Chat feels slow under heavy load | Relaunch with `CHATDESK_WEB_FULL_JIT=1`. |
 

@@ -1,4 +1,4 @@
-﻿#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 //! ChatDesk Web — a wry-based Google Chat shell for Windows.
 //!
@@ -8,7 +8,6 @@
 
 use std::{
     cell::RefCell,
-    ffi::c_void,
     fs,
     net::{TcpListener, TcpStream},
     path::PathBuf,
@@ -25,19 +24,25 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
-    platform::windows::WindowExtWindows,
     window::{Icon, Window, WindowBuilder},
 };
+#[cfg(windows)]
+use tao::platform::windows::WindowExtWindows;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use wry::{
-    MemoryUsageLevel, NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse, Theme,
-    WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows,
+    NewWindowResponse, PageLoadEvent, PermissionKind, PermissionResponse, WebContext, WebView,
+    WebViewBuilder,
 };
-
+#[cfg(windows)]
+use wry::{MemoryUsageLevel, Theme, WebViewBuilderExtWindows, WebViewExtWindows};
+#[cfg(windows)]
+use std::ffi::c_void;
+#[cfg(windows)]
 use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::HICON;
 
 const APP_NAME: &str = "ChatDesk Web";
@@ -129,16 +134,89 @@ impl Settings {
     }
 }
 
+/// Per-OS application data directory (without the trailing `profile` part).
+fn app_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(PROFILE_DIR)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+            dir.join(PROFILE_DIR)
+        } else {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".config")
+                .join(PROFILE_DIR)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Library")
+            .join("Application Support")
+            .join(PROFILE_DIR)
+    }
+}
+
 fn settings_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| root.join(PROFILE_DIR).join(SETTINGS_FILE))
-        .unwrap_or_else(|| PathBuf::from(SETTINGS_FILE))
+    app_data_dir().join(SETTINGS_FILE)
+}
+
+/// Writes (or removes) the OS login-item entry that makes ChatDesk autoboot.
+/// The settings file is the source of truth and is synced to it on every
+/// launch and whenever the tray switch is flipped.
+#[cfg(not(windows))]
+fn set_launch_at_login(on: bool) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (path, content) = {
+        let dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join(".config")
+            })
+            .join("autostart");
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        (
+            dir.join("chatdesk.desktop"),
+            format!("[Desktop Entry]\nType=Application\nName=ChatDesk\nExec={exe}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"),
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let (path, content) = {
+        let dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Library")
+            .join("LaunchAgents");
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        (
+            dir.join("com.chatdesk.web.plist"),
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>com.chatdesk.web</string><key>ProgramArguments</key><array><string>{exe}</string></array><key>RunAtLoad</key><true/></dict></plist>\n"),
+        )
+    };
+    if on {
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&path, content);
+    } else {
+        let _ = fs::remove_file(&path);
+    }
 }
 
 /// The `HKCU\...\Run` entry that makes Windows start ChatDesk at login.
-/// The settings file is the source of truth; the registry is synced to it on
-/// every launch and whenever the tray switch is flipped.
+#[cfg(windows)]
 fn set_launch_at_login(on: bool) {
     use windows::core::{w, HSTRING};
     use windows::Win32::System::Registry::{
@@ -226,8 +304,8 @@ const BROWSER_ARGS: &str = "--no-first-run \
 --metrics-recording-only \
 --no-pings \
 --autoplay-policy=no-user-gesture-required \
---disk-cache-size=16777216 \
---media-cache-size=4194304 \
+--disk-cache-size=8388608 \
+--media-cache-size=2097152 \
 --enable-features=NetworkServiceInProcess,NetworkServiceInProcess2 \
 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,site-per-process,IsolateOrigins,\
 SpareRendererForSitePerProcess,BackForwardCache,OptimizationHints,OptimizationGuideModelDownloading,\
@@ -240,7 +318,7 @@ msDiagnosticDataForceEnabled,msAutofillEdgeServiceCommunication,WebRtcAllowInput
 /// Chat stays responsive because it is mostly idle. `CHATDESK_WEB_FULL_JIT=1`
 /// turns the JIT back on for maximum JS speed.
 const JS_FLAGS: &str =
-    "--optimize-for-size,--max-old-space-size=128,--max-semi-space-size=1,--stack-size=1048576";
+    "--optimize-for-size,--max-old-space-size=96,--max-semi-space-size=1,--stack-size=1048576";
 
 fn browser_args() -> String {
     let full_jit = std::env::var_os("CHATDESK_WEB_FULL_JIT").is_some_and(|v| v != "0");
@@ -262,7 +340,7 @@ fn browser_args() -> String {
 /// `CHATDESK_WEB_TEARDOWN_SECS` (default 30) in the tray: ~3 MB, but no
 /// messages until the window is reopened.
 const DEFAULT_TEARDOWN_SECS: u64 = 30;
-const HIDDEN_TRIM_SECS: u64 = 30;
+const HIDDEN_TRIM_SECS: u64 = 20;
 
 /// Google Chat re-raises notifications for already-pending messages right
 /// after it loads. Anything arriving this soon after a load is not ballooned.
@@ -270,7 +348,7 @@ const NOTIFY_GRACE_SECS: u64 = 20;
 
 /// How long the window may sit unfocused before the engine is asked to drop
 /// caches (MemoryUsageLevel::Low).
-const IDLE_TRIM_SECS: u64 = 20;
+const IDLE_TRIM_SECS: u64 = 15;
 
 const EDGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0";
@@ -378,7 +456,6 @@ fn main() -> Result<()> {
 
     let profile = profile_dir()?;
     fs::create_dir_all(&profile)?;
-    register_app_identity();
 
     let icon = app_icon();
     let window = WindowBuilder::new()
@@ -393,14 +470,16 @@ fn main() -> Result<()> {
     if settings.win_w > 0 && settings.win_h > 0 {
         window.set_inner_size(tao::dpi::PhysicalSize::new(settings.win_w, settings.win_h));
     }
-    if settings.win_x != i32::MIN && settings.win_y != i32::MIN {
+    if settings.win_x != i32::MIN
+        && settings.win_y != i32::MIN
+        && position_on_screen(&window, settings.win_x, settings.win_y)
+    {
         window.set_outer_position(tao::dpi::PhysicalPosition::new(settings.win_x, settings.win_y));
     }
     if settings.maximized {
         window.set_maximized(true);
     }
 
-    let hwnd = HWND(window.hwnd() as *mut c_void);
 
     let normal_tray_icon = tray_icon_image()?;
     let badge_tray_icon = tray_icon::Icon::from_rgba(
@@ -409,8 +488,16 @@ fn main() -> Result<()> {
         ICON_SIZE,
     )
     .context("invalid badge icon buffer")?;
-    let overlay_on = rgba_to_hicon(ICON_OVERLAY_16, OVERLAY_SIZE);
+    #[cfg(windows)]
+    let taskbar = Taskbar {
+        hwnd: HWND(window.hwnd() as *mut std::ffi::c_void),
+        overlay_on: rgba_to_hicon(ICON_OVERLAY_16, OVERLAY_SIZE),
+    };
+    #[cfg(not(windows))]
+    let taskbar = Taskbar {};
 
+    #[cfg(windows)]
+    register_app_identity();
     install_tray_handlers(&proxy);
 
     let tray = Rc::new(RefCell::new(None));
@@ -461,8 +548,7 @@ fn main() -> Result<()> {
         engine,
         webview,
         tray,
-        hwnd,
-        overlay_on,
+        taskbar,
         normal_tray_icon,
         badge_tray_icon,
         started,
@@ -501,15 +587,12 @@ impl Engine {
         let loaded_marker = self.loaded_marker.clone();
         let started = self.started;
 
-        let webview = WebViewBuilder::new_with_web_context(&mut self.context)
+        let builder = WebViewBuilder::new_with_web_context(&mut self.context)
             .with_url(start_url())
             .with_user_agent(EDGE_UA)
-            .with_theme(Theme::Dark)
             .with_background_color((32, 33, 36, 255))
             .with_devtools(false)
             .with_hotkeys_zoom(false)
-            .with_browser_accelerator_keys(false)
-            .with_additional_browser_args(browser_args())
             .with_permission_handler(|kind| match kind {
                 PermissionKind::Notifications
                 | PermissionKind::ClipboardRead
@@ -520,15 +603,16 @@ impl Engine {
             .with_navigation_handler(|url| {
                 if nav_allowed(&url) {
                     true
-                } else if !is_google(&url) {
-                    let _ = open::that(&url);
-                    false
                 } else {
+                    // Any hop off chat.google.com (Docs, Drive, Meet, news,
+                    // anything shared in chat) goes to the default browser;
+                    // a plain click is enough, no modifier key involved.
+                    let _ = open::that(&url);
                     false
                 }
             })
             .with_new_window_req_handler(|url, _| {
-                if !is_google(&url) {
+                if !nav_allowed(&url) {
                     let _ = open::that(&url);
                 }
                 if !CHAT_LOADED.load(Ordering::Acquire) && host_of(&url) == "accounts.google.com" {
@@ -581,10 +665,18 @@ impl Engine {
                     let _ = proxy_for_load.send_event(UserEvent::SelfTest);
                 }
             })
-            .with_initialization_script(PAGE_BRIDGE)
-            .build(window)?;
+            .with_initialization_script(PAGE_BRIDGE);
 
+        // WebView2-only tuning: dark theme, no browser hotkeys, memory flags.
+        #[cfg(windows)]
+        let builder = builder
+            .with_theme(Theme::Dark)
+            .with_browser_accelerator_keys(false)
+            .with_additional_browser_args(browser_args());
+
+        let webview = builder.build(window)?;
         let _ = webview.zoom(self.zoom);
+        #[cfg(windows)]
         install_native_notification_hook(&webview, self.proxy.clone());
         Ok(webview)
     }
@@ -647,8 +739,7 @@ fn run(
     mut engine: Engine,
     webview: WebView,
     tray: Rc<RefCell<Option<TrayIcon>>>,
-    hwnd: HWND,
-    overlay_on: Option<HICON>,
+    taskbar: Taskbar,
     normal_tray_icon: tray_icon::Icon,
     badge_tray_icon: tray_icon::Icon,
     started: Instant,
@@ -679,7 +770,7 @@ fn run(
         window.set_visible(false);
         if let Some(webview) = &webview {
             let _ = webview.set_visible(false);
-            let _ = webview.set_memory_usage_level(MemoryUsageLevel::Low);
+            set_engine_memory_level(webview, true);
             trim_engine(webview);
         }
         trimmed = true;
@@ -704,7 +795,7 @@ fn run(
                 if let Some(webview) = &webview {
                     // Hidden controller: no painting, GPU tiles released.
                     let _ = webview.set_visible(false);
-                    let _ = webview.set_memory_usage_level(MemoryUsageLevel::Low);
+                    set_engine_memory_level(webview, true);
                     trim_engine(webview);
                 }
                 trimmed = true;
@@ -721,12 +812,12 @@ fn run(
                 if trimmed {
                     trimmed = false;
                     if let Some(webview) = &webview {
-                        let _ = webview.set_memory_usage_level(MemoryUsageLevel::Normal);
+                        set_engine_memory_level(webview, false);
                     }
                 }
                 if badge_on {
                     badge_on = false;
-                    apply_badge(false, &tray, &window, hwnd, overlay_on, &normal_tray_icon);
+                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
                 }
             }
             Event::WindowEvent {
@@ -750,7 +841,7 @@ fn run(
                     }
                 }
                 if let Some(webview) = &webview {
-                    let _ = webview.set_memory_usage_level(MemoryUsageLevel::Normal);
+                    set_engine_memory_level(webview, false);
                     let _ = webview.set_visible(true);
                 }
                 trimmed = false;
@@ -759,20 +850,20 @@ fn run(
                 window.set_focus();
                 if badge_on {
                     badge_on = false;
-                    apply_badge(false, &tray, &window, hwnd, overlay_on, &normal_tray_icon);
+                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
                 }
             }
             Event::UserEvent(UserEvent::Badge(true)) => {
                 if !badge_on {
                     badge_on = true;
-                    apply_badge(true, &tray, &window, hwnd, overlay_on, &badge_tray_icon);
+                    apply_badge(true, &tray, &window, &taskbar, &badge_tray_icon);
                     write_marker(&markers.badge, started.elapsed());
                 }
             }
             Event::UserEvent(UserEvent::Badge(false)) => {
                 if badge_on {
                     badge_on = false;
-                    apply_badge(false, &tray, &window, hwnd, overlay_on, &normal_tray_icon);
+                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
                 }
             }
             Event::UserEvent(UserEvent::Notify { title, body }) => {
@@ -798,7 +889,7 @@ fn run(
                 }
                 if hidden && !badge_on {
                     badge_on = true;
-                    apply_badge(true, &tray, &window, hwnd, overlay_on, &badge_tray_icon);
+                    apply_badge(true, &tray, &window, &taskbar, &badge_tray_icon);
                     write_marker(&markers.badge, started.elapsed());
                 }
                 if let Some(path) = &markers.notify {
@@ -890,7 +981,7 @@ fn run(
                 if !trimmed {
                     trimmed = true;
                     if let Some(webview) = &webview {
-                        let _ = webview.set_memory_usage_level(MemoryUsageLevel::Low);
+                        set_engine_memory_level(webview, true);
                         trim_engine(webview);
                     }
                 }
@@ -906,6 +997,7 @@ fn run(
                 if webview.take().is_some() {
                     // Dropping the WebView closes its controller; with no
                     // controller left, the msedgewebview2 process tree exits.
+                    #[cfg(windows)]
                     trim_own_working_set();
                 }
             } else {
@@ -934,6 +1026,7 @@ fn run(
 }
 
 /// Hands this process's idle pages back to Windows.
+#[cfg(windows)]
 fn trim_own_working_set() {
     use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
     unsafe {
@@ -945,6 +1038,7 @@ fn trim_own_working_set() {
 /// browser process and its renderer/utility children) plus our own. The pages
 /// go to the standby list, so the RAM is free for other apps, and anything the
 /// page touches again is faulted back in on demand.
+#[cfg(windows)]
 fn trim_engine(webview: &WebView) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -998,6 +1092,7 @@ fn trim_engine(webview: &WebView) {
 /// Registers a display name and icon for our AppUserModelID. Without this,
 /// Windows has no identity to show on ChatDesk's tray notifications and can
 /// present them under the wrong app.
+#[cfg(windows)]
 fn register_app_identity() {
     use windows::core::{w, HSTRING};
     use windows::Win32::System::Registry::{
@@ -1037,6 +1132,7 @@ fn register_app_identity() {
 }
 
 /// A single-image 32bpp .ico built from straight RGBA bytes.
+#[cfg(windows)]
 fn ico_bytes(rgba: &[u8], size: u32) -> Vec<u8> {
     let pixels = (size * size * 4) as usize;
     let mask_row = (size.div_ceil(32) * 4) as usize;
@@ -1163,6 +1259,7 @@ fn install_tray_handlers(proxy: &EventLoopProxy<UserEvent>) {
 /// notifications, so the tray stays correct even when the page does not route
 /// them through `window.Notification`. Returns silently on older runtimes or
 /// when the runtime does not expose the event.
+#[cfg(windows)]
 fn install_native_notification_hook(webview: &WebView, proxy: EventLoopProxy<UserEvent>) {
     use windows::core::{Interface, PWSTR};
 
@@ -1212,13 +1309,34 @@ fn take_wide(value: windows::core::PWSTR) -> String {
     text
 }
 
+
+/// Asks the engine to drop caches (Windows WebView2 memory-usage level).
+#[cfg(windows)]
+fn set_engine_memory_level(webview: &WebView, low: bool) {
+    let _ = webview.set_memory_usage_level(if low {
+        MemoryUsageLevel::Low
+    } else {
+        MemoryUsageLevel::Normal
+    });
+}
+
+#[cfg(not(windows))]
+fn set_engine_memory_level(_webview: &WebView, _low: bool) {}
+
+/// The Windows taskbar handle + overlay icon; empty on other platforms.
+struct Taskbar {
+    #[cfg(windows)]
+    hwnd: HWND,
+    #[cfg(windows)]
+    overlay_on: Option<HICON>,
+}
+
 /// Applies the tray icon, tooltip, window title and taskbar overlay at once.
 fn apply_badge(
     on: bool,
     tray: &Rc<RefCell<Option<TrayIcon>>>,
     window: &Window,
-    hwnd: HWND,
-    overlay_on: Option<HICON>,
+    taskbar: &Taskbar,
     icon: &tray_icon::Icon,
 ) {
     if let Some(tray_icon) = tray.borrow().as_ref() {
@@ -1235,12 +1353,28 @@ fn apply_badge(
         WINDOW_TITLE.to_string()
     };
     window.set_title(&title);
-    let overlay = if on {
-        overlay_on.unwrap_or(HICON(std::ptr::null_mut()))
-    } else {
-        HICON(std::ptr::null_mut())
-    };
-    set_taskbar_overlay(hwnd, overlay);
+    #[cfg(windows)]
+    {
+        let overlay = if on {
+            taskbar.overlay_on.unwrap_or(HICON(std::ptr::null_mut()))
+        } else {
+            HICON(std::ptr::null_mut())
+        };
+        set_taskbar_overlay(taskbar.hwnd, overlay);
+    }
+}
+
+/// True when the saved window position lands on a currently attached monitor,
+/// so a restored window can never appear off-screen after a display change.
+fn position_on_screen(window: &Window, x: i32, y: i32) -> bool {
+    window.available_monitors().any(|monitor| {
+        let origin = monitor.position();
+        let size = monitor.size();
+        x >= origin.x
+            && y >= origin.y
+            && x < origin.x + size.width as i32
+            && y < origin.y + size.height as i32
+    })
 }
 
 /// Pulls a leading "(N)" unread count out of the document title.
@@ -1263,6 +1397,7 @@ fn parse_unread(title: &str) -> u32 {
 }
 
 /// Builds a 32bpp HICON from straight RGBA bytes.
+#[cfg(windows)]
 #[cfg(windows)]
 fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<HICON> {
     use std::mem::zeroed;
@@ -1345,6 +1480,7 @@ fn rgba_to_hicon(rgba: &[u8], size: u32) -> Option<HICON> {
 }
 
 /// Puts a small badge on the window's taskbar button, or clears it for a null icon.
+#[cfg(windows)]
 fn set_taskbar_overlay(hwnd: HWND, icon: HICON) {
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -1363,6 +1499,7 @@ fn set_taskbar_overlay(hwnd: HWND, icon: HICON) {
 }
 
 /// Finds the hidden window the tray-icon crate created for us (class `tray_icon_app`).
+#[cfg(windows)]
 fn own_tray_hwnd() -> Option<HWND> {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW};
@@ -1389,6 +1526,7 @@ fn own_tray_hwnd() -> Option<HWND> {
     found
 }
 
+#[cfg(windows)]
 fn copy_wide(dst: &mut [u16], text: &str) {
     let mut i = 0;
     for unit in text.encode_utf16() {
@@ -1402,6 +1540,7 @@ fn copy_wide(dst: &mut [u16], text: &str) {
 }
 
 /// Raises a genuine notification-area balloon on our tray icon.
+#[cfg(windows)]
 fn show_tray_balloon(title: &str, body: &str) -> bool {
     use std::mem::size_of;
     use windows::Win32::UI::Shell::{
@@ -1434,6 +1573,7 @@ fn show_tray_balloon(title: &str, body: &str) -> bool {
 
 /// The id tray-icon registered our icon under. It is not documented, so ask the
 /// shell which (hwnd, id) pair it actually knows about, once.
+#[cfg(windows)]
 fn tray_icon_id(hwnd: HWND) -> u32 {
     static TRAY_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -1463,6 +1603,7 @@ fn tray_icon_id(hwnd: HWND) -> u32 {
 }
 
 /// Locates the tray icon's hidden window, preferring our own thread.
+#[cfg(windows)]
 fn find_tray_hwnd() -> Option<HWND> {
     if let Some(hwnd) = own_tray_hwnd() {
         return Some(hwnd);
@@ -1482,6 +1623,7 @@ fn start_url() -> String {
     std::env::var("CHATDESK_WEB_URL").unwrap_or_else(|_| START_URL.to_string())
 }
 
+#[cfg(windows)]
 fn set_app_user_model_id() {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
@@ -1572,11 +1714,6 @@ fn host_of(url: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn is_google(url: &str) -> bool {
-    let host = host_of(url);
-    host == "google.com" || host.ends_with(".google.com")
-}
-
 /// Tries to take the single-instance port. Returns `None` when another instance
 /// already owns it, after asking that instance to show itself.
 fn claim_single_instance() -> Option<TcpListener> {
@@ -1601,6 +1738,7 @@ fn tray_icon_image() -> Result<tray_icon::Icon> {
         .context("invalid tray icon buffer")
 }
 
+#[cfg(windows)]
 fn fatal(message: &str) {
     use windows::{
         core::HSTRING,
@@ -1618,4 +1756,25 @@ fn fatal(message: &str) {
             MB_OK | MB_ICONERROR,
         );
     }
+}
+
+/// On Linux and macOS the webview and the OS manage memory themselves.
+#[cfg(not(windows))]
+fn trim_engine(_webview: &WebView) {}
+
+/// Balloons are a Windows shell feature; other platforms rely on the page's
+/// own desktop notifications.
+#[cfg(not(windows))]
+fn show_tray_balloon(_title: &str, _body: &str) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn set_app_user_model_id() {}
+
+#[cfg(not(windows))]
+fn fatal(message: &str) {
+    eprintln!("{message}");
+    let _ = fs::write(std::env::temp_dir().join("chatdesk-web-error.txt"), message);
+    std::process::exit(1);
 }
