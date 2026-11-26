@@ -50,6 +50,7 @@ const START_URL: &str = "https://chat.google.com";
 const WINDOW_TITLE: &str = "Google Chat";
 const PROFILE_DIR: &str = "ChatDeskWeb";
 const SETTINGS_FILE: &str = "settings.txt";
+#[cfg(windows)]
 const RUN_VALUE_NAME: &str = "ChatDesk";
 const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:39147";
 const MIN_ZOOM: f64 = 0.5;
@@ -284,6 +285,7 @@ static FOCUSED: AtomicBool = AtomicBool::new(false);
 /// * Background throttling is left ON so a minimized window gets cheap.
 /// * wry's default flags (mini menu / SmartScreen off) are replaced by
 ///   anything passed here, so they are repeated in the one --disable-features.
+#[cfg(windows)]
 const BROWSER_ARGS: &str = "--no-first-run \
 --no-default-browser-check \
 --in-process-gpu \
@@ -317,9 +319,11 @@ msDiagnosticDataForceEnabled,msAutofillEdgeServiceCommunication,WebRtcAllowInput
 /// JIT, no feedback vectors): the chat renderer drops ~20-50 MB, and Google
 /// Chat stays responsive because it is mostly idle. `CHATDESK_WEB_FULL_JIT=1`
 /// turns the JIT back on for maximum JS speed.
+#[cfg(windows)]
 const JS_FLAGS: &str =
     "--optimize-for-size,--max-old-space-size=96,--max-semi-space-size=1,--stack-size=1048576";
 
+#[cfg(windows)]
 fn browser_args() -> String {
     let full_jit = std::env::var_os("CHATDESK_WEB_FULL_JIT").is_some_and(|v| v != "0");
     let lite = if full_jit { "" } else { "--lite-mode," };
