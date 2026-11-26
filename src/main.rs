@@ -29,7 +29,7 @@ use tao::{
     window::{Icon, Window, WindowBuilder},
 };
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use wry::{
@@ -44,7 +44,151 @@ const APP_NAME: &str = "ChatDesk Web";
 const START_URL: &str = "https://chat.google.com";
 const WINDOW_TITLE: &str = "Google Chat";
 const PROFILE_DIR: &str = "ChatDeskWeb";
+const SETTINGS_FILE: &str = "settings.txt";
+const RUN_VALUE_NAME: &str = "ChatDesk";
 const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:39147";
+const MIN_ZOOM: f64 = 0.5;
+const MAX_ZOOM: f64 = 2.0;
+
+/// Everything ChatDesk remembers between launches: the autoboot and
+/// start-hidden switches, the zoom level and the window geometry. Stored as
+/// plain `key=value` lines so it stays human-readable and dependency-free.
+#[derive(Clone)]
+struct Settings {
+    launch_at_login: bool,
+    start_hidden: bool,
+    zoom: f64,
+    win_x: i32,
+    win_y: i32,
+    win_w: u32,
+    win_h: u32,
+    maximized: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            launch_at_login: false,
+            start_hidden: false,
+            zoom: 1.0,
+            win_x: i32::MIN,
+            win_y: i32::MIN,
+            win_w: 0,
+            win_h: 0,
+            maximized: false,
+        }
+    }
+}
+
+impl Settings {
+    fn load() -> Self {
+        let mut settings = Self::default();
+        let Ok(text) = fs::read_to_string(settings_path()) else {
+            return settings;
+        };
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "launch_at_login" => settings.launch_at_login = value == "1",
+                "start_hidden" => settings.start_hidden = value == "1",
+                "zoom" => {
+                    if let Ok(zoom) = value.parse::<f64>() {
+                        settings.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+                    }
+                }
+                "win_x" => settings.win_x = value.parse().unwrap_or(i32::MIN),
+                "win_y" => settings.win_y = value.parse().unwrap_or(i32::MIN),
+                "win_w" => settings.win_w = value.parse().unwrap_or(0),
+                "win_h" => settings.win_h = value.parse().unwrap_or(0),
+                "maximized" => settings.maximized = value == "1",
+                _ => {}
+            }
+        }
+        settings
+    }
+
+    fn save(&self) {
+        let text = format!(
+            "launch_at_login={}\nstart_hidden={}\nzoom={}\nwin_x={}\nwin_y={}\nwin_w={}\nwin_h={}\nmaximized={}\n",
+            self.launch_at_login as u8,
+            self.start_hidden as u8,
+            self.zoom,
+            self.win_x,
+            self.win_y,
+            self.win_w,
+            self.win_h,
+            self.maximized as u8,
+        );
+        if let Some(dir) = settings_path().parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(settings_path(), text);
+    }
+}
+
+fn settings_path() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|root| root.join(PROFILE_DIR).join(SETTINGS_FILE))
+        .unwrap_or_else(|| PathBuf::from(SETTINGS_FILE))
+}
+
+/// The `HKCU\...\Run` entry that makes Windows start ChatDesk at login.
+/// The settings file is the source of truth; the registry is synced to it on
+/// every launch and whenever the tray switch is flipped.
+fn set_launch_at_login(on: bool) {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ,
+    };
+
+    let wide = |value: &str| -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    };
+
+    unsafe {
+        let mut key = HKEY::default();
+        if on {
+            let Ok(exe) = std::env::current_exe() else {
+                return;
+            };
+            let command = format!("\"{}\"", exe.display());
+            if RegCreateKeyW(
+                HKEY_CURRENT_USER,
+                w!("Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run"),
+                &mut key,
+            )
+            .is_ok()
+            {
+                let bytes = wide(&command);
+                let bytes = std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len() * 2);
+                let _ = RegSetValueExW(
+                    key,
+                    &HSTRING::from(RUN_VALUE_NAME),
+                    None,
+                    REG_SZ,
+                    Some(bytes),
+                );
+                let _ = RegCloseKey(key);
+            }
+        } else if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run"),
+            None,
+            KEY_SET_VALUE,
+            &mut key,
+        )
+        .is_ok()
+        {
+            let _ = RegDeleteValueW(key, &HSTRING::from(RUN_VALUE_NAME));
+            let _ = RegCloseKey(key);
+        }
+    }
+}
 
 /// True once the chat page has finished loading.
 static CHAT_LOADED: AtomicBool = AtomicBool::new(false);
@@ -82,22 +226,21 @@ const BROWSER_ARGS: &str = "--no-first-run \
 --metrics-recording-only \
 --no-pings \
 --autoplay-policy=no-user-gesture-required \
---disk-cache-size=33554432 \
---media-cache-size=8388608 \
+--disk-cache-size=16777216 \
+--media-cache-size=4194304 \
 --enable-features=NetworkServiceInProcess,NetworkServiceInProcess2 \
 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,site-per-process,IsolateOrigins,\
 SpareRendererForSitePerProcess,BackForwardCache,OptimizationHints,OptimizationGuideModelDownloading,\
 MediaRouter,Translate,AutofillServerCommunication,InterestFeedContentSuggestions,\
 CertificateTransparencyComponentUpdater,msEdgeShoppingUI,msEdgeCollections,msImplicitSignin,\
-msDiagnosticDataForceEnabled,msAutofillEdgeServiceCommunication,WebRtcAllowInputVolumeAdjustment,\
-IntensiveWakeUpThrottling";
+msDiagnosticDataForceEnabled,msAutofillEdgeServiceCommunication,WebRtcAllowInputVolumeAdjustment";
 
 /// V8 tuning. `--lite-mode` runs JS in the interpreter only (no optimizing
 /// JIT, no feedback vectors): the chat renderer drops ~20-50 MB, and Google
 /// Chat stays responsive because it is mostly idle. `CHATDESK_WEB_FULL_JIT=1`
 /// turns the JIT back on for maximum JS speed.
 const JS_FLAGS: &str =
-    "--optimize-for-size,--max-old-space-size=256,--max-semi-space-size=2,--stack-size=1048576";
+    "--optimize-for-size,--max-old-space-size=128,--max-semi-space-size=1,--stack-size=1048576";
 
 fn browser_args() -> String {
     let full_jit = std::env::var_os("CHATDESK_WEB_FULL_JIT").is_some_and(|v| v != "0");
@@ -119,7 +262,7 @@ fn browser_args() -> String {
 /// `CHATDESK_WEB_TEARDOWN_SECS` (default 30) in the tray: ~3 MB, but no
 /// messages until the window is reopened.
 const DEFAULT_TEARDOWN_SECS: u64 = 30;
-const HIDDEN_TRIM_SECS: u64 = 60;
+const HIDDEN_TRIM_SECS: u64 = 30;
 
 /// Google Chat re-raises notifications for already-pending messages right
 /// after it loads. Anything arriving this soon after a load is not ballooned.
@@ -127,7 +270,7 @@ const NOTIFY_GRACE_SECS: u64 = 20;
 
 /// How long the window may sit unfocused before the engine is asked to drop
 /// caches (MemoryUsageLevel::Low).
-const IDLE_TRIM_SECS: u64 = 45;
+const IDLE_TRIM_SECS: u64 = 20;
 
 const EDGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0";
@@ -206,6 +349,14 @@ enum UserEvent {
     ChatLoaded,
     SelfTest,
     Quit,
+    Nav(&'static str),
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    ToggleLaunchAtLogin,
+    ToggleStartHidden,
+    CheckUpdates,
+    ResetAppData,
 }
 
 fn main() -> Result<()> {
@@ -222,6 +373,9 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
+    let settings = Settings::load();
+    set_launch_at_login(settings.launch_at_login);
+
     let profile = profile_dir()?;
     fs::create_dir_all(&profile)?;
     register_app_identity();
@@ -235,6 +389,16 @@ fn main() -> Result<()> {
         .with_decorations(true)
         .build(&event_loop)
         .context("cannot create the application window")?;
+
+    if settings.win_w > 0 && settings.win_h > 0 {
+        window.set_inner_size(tao::dpi::PhysicalSize::new(settings.win_w, settings.win_h));
+    }
+    if settings.win_x != i32::MIN && settings.win_y != i32::MIN {
+        window.set_outer_position(tao::dpi::PhysicalPosition::new(settings.win_x, settings.win_y));
+    }
+    if settings.maximized {
+        window.set_maximized(true);
+    }
 
     let hwnd = HWND(window.hwnd() as *mut c_void);
 
@@ -250,7 +414,7 @@ fn main() -> Result<()> {
     install_tray_handlers(&proxy);
 
     let tray = Rc::new(RefCell::new(None));
-    let menu = build_menu()?;
+    let (menu, menu_handles) = build_menu(&settings)?;
     *tray.borrow_mut() = Some(
         TrayIconBuilder::new()
             .with_icon(normal_tray_icon.clone())
@@ -266,6 +430,7 @@ fn main() -> Result<()> {
         downloads: downloads_dir(),
         loaded_marker: marker_path("CHATDESK_WEB_LOADED_MARKER"),
         started,
+        zoom: settings.zoom,
     };
 
     let webview = match engine.build(&window) {
@@ -289,6 +454,7 @@ fn main() -> Result<()> {
         }
     });
 
+    let start_hidden = settings.start_hidden;
     run(
         event_loop,
         window,
@@ -300,6 +466,9 @@ fn main() -> Result<()> {
         normal_tray_icon,
         badge_tray_icon,
         started,
+        Rc::new(RefCell::new(settings)),
+        menu_handles,
+        start_hidden,
         Timings {
             window: marker_path("CHATDESK_WEB_WINDOW_MARKER"),
             badge: marker_path("CHATDESK_WEB_BADGE_MARKER"),
@@ -320,6 +489,7 @@ struct Engine {
     downloads: PathBuf,
     loaded_marker: Option<PathBuf>,
     started: Instant,
+    zoom: f64,
 }
 
 impl Engine {
@@ -414,6 +584,7 @@ impl Engine {
             .with_initialization_script(PAGE_BRIDGE)
             .build(window)?;
 
+        let _ = webview.zoom(self.zoom);
         install_native_notification_hook(&webview, self.proxy.clone());
         Ok(webview)
     }
@@ -423,6 +594,38 @@ struct Timings {
     window: Option<PathBuf>,
     badge: Option<PathBuf>,
     notify: Option<PathBuf>,
+}
+
+/// Applies a zoom step to the live webview, remembers it for engine rebuilds,
+/// and persists it so the next launch starts at the same size.
+fn apply_zoom(
+    webview: &Option<WebView>,
+    engine: &mut Engine,
+    settings: &Rc<RefCell<Settings>>,
+    zoom: f64,
+) {
+    let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    settings.borrow_mut().zoom = zoom;
+    settings.borrow().save();
+    engine.zoom = zoom;
+    if let Some(webview) = webview {
+        let _ = webview.zoom(zoom);
+    }
+}
+
+/// Writes the current window geometry to the settings file so ChatDesk opens
+/// exactly where and how large you left it.
+fn persist_window_state(window: &Window, settings: &Rc<RefCell<Settings>>) {
+    let mut current = settings.borrow_mut();
+    current.maximized = window.is_maximized();
+    if let Ok(position) = window.outer_position() {
+        current.win_x = position.x;
+        current.win_y = position.y;
+    }
+    let size = window.inner_size();
+    current.win_w = size.width;
+    current.win_h = size.height;
+    current.save();
 }
 
 /// `None` (the default) keeps the engine alive in the tray for passive messages.
@@ -449,6 +652,9 @@ fn run(
     normal_tray_icon: tray_icon::Icon,
     badge_tray_icon: tray_icon::Icon,
     started: Instant,
+    settings: Rc<RefCell<Settings>>,
+    menu: MenuHandles,
+    start_hidden: bool,
     markers: Timings,
 ) {
     let mut webview = Some(webview);
@@ -469,6 +675,18 @@ fn run(
     // When chat.google.com last finished loading (for the notification grace).
     let mut chat_loaded_at: Option<Instant> = None;
 
+    if start_hidden {
+        window.set_visible(false);
+        if let Some(webview) = &webview {
+            let _ = webview.set_visible(false);
+            let _ = webview.set_memory_usage_level(MemoryUsageLevel::Low);
+            trim_engine(webview);
+        }
+        trimmed = true;
+        hidden_since = Some(Instant::now());
+        last_hidden_trim = Some(Instant::now());
+    }
+
     event_loop.run(move |event, _, control_flow| {
         if !window_painted {
             window_painted = true;
@@ -481,6 +699,7 @@ fn run(
                 ..
             } => {
                 FOCUSED.store(false, Ordering::Relaxed);
+                persist_window_state(&window, &settings);
                 window.set_visible(false);
                 if let Some(webview) = &webview {
                     // Hidden controller: no painting, GPU tiles released.
@@ -604,7 +823,54 @@ fn run(
             Event::UserEvent(UserEvent::OpenChat) => {
                 let _ = open::that(start_url());
             }
+            Event::UserEvent(UserEvent::Nav(script)) => {
+                if let Some(webview) = &webview {
+                    let _ = webview.evaluate_script(script);
+                }
+            }
+            Event::UserEvent(UserEvent::ZoomIn) => {
+                let next = (settings.borrow().zoom * 1.1).min(MAX_ZOOM);
+                apply_zoom(&webview, &mut engine, &settings, next);
+            }
+            Event::UserEvent(UserEvent::ZoomOut) => {
+                let next = (settings.borrow().zoom / 1.1).max(MIN_ZOOM);
+                apply_zoom(&webview, &mut engine, &settings, next);
+            }
+            Event::UserEvent(UserEvent::ZoomReset) => {
+                apply_zoom(&webview, &mut engine, &settings, 1.0);
+            }
+            Event::UserEvent(UserEvent::ToggleLaunchAtLogin) => {
+                let mut current = settings.borrow_mut();
+                current.launch_at_login = !current.launch_at_login;
+                set_launch_at_login(current.launch_at_login);
+                menu.launch.set_checked(current.launch_at_login);
+                current.save();
+            }
+            Event::UserEvent(UserEvent::ToggleStartHidden) => {
+                let mut current = settings.borrow_mut();
+                current.start_hidden = !current.start_hidden;
+                menu.hidden.set_checked(current.start_hidden);
+                current.save();
+            }
+            Event::UserEvent(UserEvent::CheckUpdates) => {
+                let _ = open::that("https://github.com/virusdeflect21/ChatDesk/releases/latest");
+            }
+            Event::UserEvent(UserEvent::ResetAppData) => {
+                // Drop the engine, wipe the isolated profile, start clean.
+                webview.take();
+                set_launch_at_login(false);
+                if let Ok(profile) = profile_dir() {
+                    let _ = fs::remove_dir_all(profile);
+                }
+                Settings::default().save();
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe).spawn();
+                }
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
             Event::UserEvent(UserEvent::Quit) => {
+                persist_window_state(&window, &settings);
                 *control_flow = ControlFlow::Exit;
                 return;
             }
@@ -798,32 +1064,62 @@ fn ico_bytes(rgba: &[u8], size: u32) -> Vec<u8> {
     out
 }
 
-fn build_menu() -> Result<Menu> {
-    let show = MenuItem::with_id(
-        "show",
-        "Show Google Chat",
+/// Tray menu items whose checked state is toggled at runtime.
+struct MenuHandles {
+    launch: Rc<CheckMenuItem>,
+    hidden: Rc<CheckMenuItem>,
+}
+
+fn build_menu(settings: &Settings) -> Result<(Menu, MenuHandles)> {
+    let accel = || None::<tray_icon::menu::accelerator::Accelerator>;
+    let show = MenuItem::with_id("show", "Show Google Chat", true, accel());
+    let back = MenuItem::with_id("back", "Back", true, accel());
+    let forward = MenuItem::with_id("fwd", "Forward", true, accel());
+    let reload = MenuItem::with_id("reload", "Reload", true, accel());
+    let home = MenuItem::with_id("home", "Back to Chat", true, accel());
+    let zoom_in = MenuItem::with_id("zoomin", "Zoom in", true, accel());
+    let zoom_out = MenuItem::with_id("zoomout", "Zoom out", true, accel());
+    let zoom_reset = MenuItem::with_id("zoomreset", "Actual size", true, accel());
+    let launch = Rc::new(CheckMenuItem::with_id(
+        "autolaunch",
+        "Start with Windows",
         true,
-        None::<tray_icon::menu::accelerator::Accelerator>,
-    );
-    let browser = MenuItem::with_id(
-        "browser",
-        "Open in default browser",
+        settings.launch_at_login,
+        accel(),
+    ));
+    let hidden = Rc::new(CheckMenuItem::with_id(
+        "starthidden",
+        "Start hidden in tray",
         true,
-        None::<tray_icon::menu::accelerator::Accelerator>,
-    );
-    let quit = MenuItem::with_id(
-        "quit",
-        "Quit ChatDesk",
-        true,
-        None::<tray_icon::menu::accelerator::Accelerator>,
-    );
+        settings.start_hidden,
+        accel(),
+    ));
+    let updates = MenuItem::with_id("updates", "Check for updates", true, accel());
+    let reset = MenuItem::with_id("reset", "Reset app data", true, accel());
+    let browser = MenuItem::with_id("browser", "Open in default browser", true, accel());
+    let quit = MenuItem::with_id("quit", "Quit ChatDesk", true, accel());
     let menu = Menu::with_items(&[
         &show,
+        &PredefinedMenuItem::separator(),
+        &back,
+        &forward,
+        &reload,
+        &home,
+        &PredefinedMenuItem::separator(),
+        &zoom_in,
+        &zoom_out,
+        &zoom_reset,
+        &PredefinedMenuItem::separator(),
+        &*launch,
+        &*hidden,
+        &PredefinedMenuItem::separator(),
+        &updates,
+        &reset,
         &browser,
         &PredefinedMenuItem::separator(),
         &quit,
     ])?;
-    Ok(menu)
+    Ok((menu, MenuHandles { launch, hidden }))
 }
 
 /// Wires the tray menu and click handlers to the event loop.
@@ -832,6 +1128,17 @@ fn install_tray_handlers(proxy: &EventLoopProxy<UserEvent>) {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let message = match event.id().as_ref() {
             "show" => UserEvent::Show,
+            "back" => UserEvent::Nav("history.back()"),
+            "fwd" => UserEvent::Nav("history.forward()"),
+            "reload" => UserEvent::Nav("location.reload()"),
+            "home" => UserEvent::Nav("location.assign('https://chat.google.com/')"),
+            "zoomin" => UserEvent::ZoomIn,
+            "zoomout" => UserEvent::ZoomOut,
+            "zoomreset" => UserEvent::ZoomReset,
+            "autolaunch" => UserEvent::ToggleLaunchAtLogin,
+            "starthidden" => UserEvent::ToggleStartHidden,
+            "updates" => UserEvent::CheckUpdates,
+            "reset" => UserEvent::ResetAppData,
             "browser" => UserEvent::OpenChat,
             _ => UserEvent::Quit,
         };
