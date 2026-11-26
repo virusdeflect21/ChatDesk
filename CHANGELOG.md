@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.3
+
+**New**
+- **No more "Home" landing screen.** ChatDesk now skips Google Chat's mostly empty "Головна"/"Home" pane (the one with the search bar your screenshot highlighted) and lands you directly in your conversation list. It works by auto-clicking the "Chats" item once per load while the UI builds; if Google changes the layout, it silently falls back to normal behavior. You can still open Home yourself from the left rail — ChatDesk only skips it on launch.
+
 ## v0.2.2
 
 **Fixes**

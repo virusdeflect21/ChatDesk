@@ -68,6 +68,7 @@ No setup: no Google Cloud project, no OAuth client, no API keys, and no Google C
 - **Linux and macOS builds** — the same app now ships for Windows, Linux (X11, webkit2gtk) and macOS (WKWebView); autoboot works everywhere (`Run` key on Windows, `~/.config/autostart` on Linux, LaunchAgent on macOS).
 - **Links always open in your browser** — a plain click is enough (no modifier key): anything that isn't Chat itself — Docs, Drive, Meet, Calendar, external sites — hands off to your default browser instead of being silently blocked.
 - **Unread counter on the Windows tray icon** — a red badge circle with the actual number of unread messages (up to 99), like other messengers; the tooltip shows the exact count too.
+- **Straight to your chats** — Google Chat's empty "Home" landing screen (with its search bar) is skipped on launch; you land in the conversation list directly.
 - **Even less RAM** — V8 heap cap 128→96 MB, disk cache 16→8 MB, idle trims 20→15 s, hidden trims 30→20 s.
 - **Off-screen window guard** — if a monitor was unplugged, the window resets to a visible position instead of restoring off-screen.
 

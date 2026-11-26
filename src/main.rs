@@ -420,6 +420,42 @@ const PAGE_BRIDGE: &str = r#"
         }
     } catch (e) {}
 
+    // Best effort: skip Google Chat's mostly empty "Home" landing screen
+    // (the pane with its search bar) and open the conversation list
+    // directly. One click per page load, retried while the UI builds.
+    var skippedHome = false;
+    var skipHome = function () {
+        if (skippedHome) {
+            return true;
+        }
+        var wanted = ['chats', 'conversations', 'chat', 'chats', 'чати', 'чаты'];
+        var nodes = document.querySelectorAll(
+            '[role="tab"], [role="treeitem"], [role="link"], [role="button"], a'
+        );
+        for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            var label = (node.getAttribute('aria-label') || '').trim().toLowerCase();
+            var text = (node.textContent || '').trim().toLowerCase();
+            for (var k = 0; k < wanted.length; k++) {
+                if (label === wanted[k] || text === wanted[k]) {
+                    try {
+                        node.click();
+                        skippedHome = true;
+                        return true;
+                    } catch (e) {}
+                }
+            }
+        }
+        return false;
+    };
+    var skipTries = 0;
+    var skipTimer = setInterval(function () {
+        skipTries += 1;
+        if (skipHome() || skipTries > 40) {
+            clearInterval(skipTimer);
+        }
+    }, 400);
+
     document.addEventListener('DOMContentLoaded', function () {
         var style = document.createElement('style');
         style.textContent = 'html, body { background: #202124; } html { overscroll-behavior: none; }';
