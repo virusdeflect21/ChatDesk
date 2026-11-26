@@ -103,6 +103,36 @@ fn draw_overlay(size: u32) -> Vec<u8> {
     data
 }
 
+/// 3x5 pixel glyphs for digits 0-9, row-major, used to draw the unread
+/// counter into the tray icon at runtime.
+fn emit_digits() -> String {
+    const ROWS: [&str; 50] = [
+        "111", "101", "101", "101", "111", // 0
+        "010", "110", "010", "010", "111", // 1
+        "111", "001", "111", "100", "111", // 2
+        "111", "001", "111", "001", "111", // 3
+        "101", "101", "111", "001", "001", // 4
+        "111", "100", "111", "001", "111", // 5
+        "111", "100", "111", "101", "111", // 6
+        "111", "001", "001", "001", "001", // 7
+        "111", "101", "111", "101", "111", // 8
+        "111", "101", "111", "001", "111", // 9
+    ];
+    let mut out = String::from("pub const DIGIT_GLYPHS: [[u8; 15]; 10] = [");
+    for digit in 0..10 {
+        out.push_str("\n    [");
+        for (i, ch) in ROWS[digit * 5..digit * 5 + 5].concat().bytes().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(if ch == b'1' { "1u8" } else { "0u8" });
+        }
+        out.push_str("],");
+    }
+    out.push_str("\n];\n");
+    out
+}
+
 fn emit(name: &str, data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len() * 4 + name.len() + 64);
     out.push_str("pub const ");
@@ -130,6 +160,7 @@ fn main() {
     src.push_str(&emit("ICON_RGBA_32", &base));
     src.push_str(&emit("ICON_BADGE_32", &badge));
     src.push_str(&emit("ICON_OVERLAY_16", &overlay));
+    src.push_str(&emit_digits());
     src.push_str("pub const ICON_SIZE: u32 = 32;\npub const OVERLAY_SIZE: u32 = 16;\n");
 
     fs::write(&dest_path, src).expect("Failed to write icon data");

@@ -12,7 +12,10 @@ use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -274,6 +277,9 @@ static CHAT_LOADED: AtomicBool = AtomicBool::new(false);
 /// True while the window is in the foreground, so we never balloon messages the
 /// user is already looking at.
 static FOCUSED: AtomicBool = AtomicBool::new(false);
+/// True when the app is exiting only in order to restart itself (Reset App
+/// Data), so main() joins the single-instance thread and respawns afterwards.
+static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 /// Chromium flags tuned for the smallest footprint that still runs Google Chat.
 ///
@@ -426,7 +432,8 @@ const PAGE_BRIDGE: &str = r#"
 enum UserEvent {
     Show,
     OpenChat,
-    Badge(bool),
+    /// Unread count for the tray badge; 0 clears it.
+    Badge(u32),
     Notify { title: String, body: String },
     ChatLoaded,
     SelfTest,
@@ -538,12 +545,27 @@ fn main() -> Result<()> {
     };
 
     let listener_proxy = proxy.clone();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let _ = listener_proxy.send_event(UserEvent::Show);
-            drop(stream);
-        }
-    });
+    let stop_listener = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop_listener.clone();
+    let listener_thread = {
+        let stop = stop_listener.clone();
+        thread::spawn(move || {
+            // Accept loop; a shutdown flag plus one self-connect lets the
+            // main thread wake and join us before respawning (Reset App Data).
+            while !stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        drop(stream);
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let _ = listener_proxy.send_event(UserEvent::Show);
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    };
 
     let start_hidden = settings.start_hidden;
     run(
@@ -559,12 +581,20 @@ fn main() -> Result<()> {
         Rc::new(RefCell::new(settings)),
         menu_handles,
         start_hidden,
+        stop_flag,
         Timings {
             window: marker_path("CHATDESK_WEB_WINDOW_MARKER"),
             badge: marker_path("CHATDESK_WEB_BADGE_MARKER"),
             notify: marker_path("CHATDESK_WEB_NOTIFY_MARKER"),
         },
     );
+
+    if RESTARTING.load(Ordering::Acquire) {
+        let _ = listener_thread.join();
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).spawn();
+        }
+    }
 
     #[allow(unreachable_code)]
     Ok(())
@@ -633,8 +663,9 @@ impl Engine {
             })
             // Unread count straight from the document title, parsed in Rust.
             .with_document_title_changed_handler(move |title| {
-                if parse_unread(&title) > 0 && !FOCUSED.load(Ordering::Relaxed) {
-                    let _ = proxy_for_title.send_event(UserEvent::Badge(true));
+                let unread = parse_unread(&title);
+                if unread > 0 && !FOCUSED.load(Ordering::Relaxed) {
+                    let _ = proxy_for_title.send_event(UserEvent::Badge(unread.min(99)));
                 }
             })
             .with_ipc_handler(move |request| {
@@ -645,8 +676,9 @@ impl Engine {
                     let text = parts.next().unwrap_or_default().to_string();
                     let _ = proxy_for_ipc.send_event(UserEvent::Notify { title, body: text });
                 } else if let Some(count) = body.strip_prefix("unread:") {
-                    if count != "0" && !FOCUSED.load(Ordering::Relaxed) {
-                        let _ = proxy_for_ipc.send_event(UserEvent::Badge(true));
+                    let unread: u32 = count.trim().parse().unwrap_or(1).min(99);
+                    if unread > 0 && !FOCUSED.load(Ordering::Relaxed) {
+                        let _ = proxy_for_ipc.send_event(UserEvent::Badge(unread));
                     }
                 }
             })
@@ -750,11 +782,12 @@ fn run(
     settings: Rc<RefCell<Settings>>,
     menu: MenuHandles,
     start_hidden: bool,
+    stop_flag: Arc<AtomicBool>,
     markers: Timings,
 ) {
     let mut webview = Some(webview);
     let mut window_painted = false;
-    let mut badge_on = false;
+    let mut badge_count: u32 = 0;
     let mut last_notification: Option<(String, Instant)> = None;
     let teardown_after = teardown_delay();
     let idle_trim_after = Duration::from_secs(IDLE_TRIM_SECS);
@@ -819,9 +852,9 @@ fn run(
                         set_engine_memory_level(webview, false);
                     }
                 }
-                if badge_on {
-                    badge_on = false;
-                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
+                if badge_count > 0 {
+                    badge_count = 0;
+                    apply_badge(0, &tray, &window, &taskbar, &normal_tray_icon, &badge_tray_icon);
                 }
             }
             Event::WindowEvent {
@@ -852,22 +885,19 @@ fn run(
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
-                if badge_on {
-                    badge_on = false;
-                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
+                if badge_count > 0 {
+                    badge_count = 0;
+                    apply_badge(0, &tray, &window, &taskbar, &normal_tray_icon, &badge_tray_icon);
                 }
             }
-            Event::UserEvent(UserEvent::Badge(true)) => {
-                if !badge_on {
-                    badge_on = true;
-                    apply_badge(true, &tray, &window, &taskbar, &badge_tray_icon);
+            Event::UserEvent(UserEvent::Badge(unread)) => {
+                if unread > 0 && badge_count != unread {
+                    badge_count = unread;
+                    apply_badge(unread, &tray, &window, &taskbar, &normal_tray_icon, &badge_tray_icon);
                     write_marker(&markers.badge, started.elapsed());
-                }
-            }
-            Event::UserEvent(UserEvent::Badge(false)) => {
-                if badge_on {
-                    badge_on = false;
-                    apply_badge(false, &tray, &window, &taskbar, &normal_tray_icon);
+                } else if unread == 0 && badge_count > 0 {
+                    badge_count = 0;
+                    apply_badge(0, &tray, &window, &taskbar, &normal_tray_icon, &badge_tray_icon);
                 }
             }
             Event::UserEvent(UserEvent::Notify { title, body }) => {
@@ -891,15 +921,15 @@ fn run(
                 if self_test || (hidden && !duplicate && !replay) {
                     shown = show_tray_balloon(&title, &body);
                 }
-                if hidden && !badge_on {
-                    badge_on = true;
-                    apply_badge(true, &tray, &window, &taskbar, &badge_tray_icon);
+                if hidden && badge_count == 0 {
+                    badge_count = 1;
+                    apply_badge(1, &tray, &window, &taskbar, &normal_tray_icon, &badge_tray_icon);
                     write_marker(&markers.badge, started.elapsed());
                 }
                 if let Some(path) = &markers.notify {
                     let _ = fs::write(
                         path,
-                        format!("balloon={shown} hidden={hidden} badge={badge_on} title={title}\n"),
+                        format!("balloon={shown} hidden={hidden} badge={badge_count} title={title}\n"),
                     );
                 }
             }
@@ -952,16 +982,25 @@ fn run(
                 let _ = open::that("https://github.com/virusdeflect21/ChatDesk/releases/latest");
             }
             Event::UserEvent(UserEvent::ResetAppData) => {
-                // Drop the engine, wipe the isolated profile, start clean.
+                // Drop the engine, wait for its browser process to release the
+                // profile files, wipe the profile, then restart ourselves.
+                #[cfg(windows)]
+                let browser = webview.as_ref().and_then(browser_process_handle);
                 webview.take();
+                #[cfg(windows)]
+                if let Some(handle) = browser {
+                    wait_for_handle(handle, Duration::from_secs(5));
+                }
                 set_launch_at_login(false);
                 if let Ok(profile) = profile_dir() {
                     let _ = fs::remove_dir_all(profile);
                 }
                 Settings::default().save();
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = std::process::Command::new(exe).spawn();
-                }
+                // Wake and stop the single-instance listener so the restarted
+                // process can claim the port instead of poking our corpse.
+                RESTARTING.store(true, Ordering::Release);
+                stop_flag.store(true, Ordering::Release);
+                let _ = TcpStream::connect(SINGLE_INSTANCE_ADDR);
                 *control_flow = ControlFlow::Exit;
                 return;
             }
@@ -1027,6 +1066,34 @@ fn run(
             None => ControlFlow::Wait,
         };
     });
+}
+
+/// Opens a waitable handle to the WebView2 browser process behind this
+/// webview, so a reset can wait for the profile files to be released.
+#[cfg(windows)]
+fn browser_process_handle(webview: &WebView) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+
+    let mut pid = 0u32;
+    unsafe {
+        if webview.webview().BrowserProcessId(&mut pid).is_err() || pid == 0 {
+            return None;
+        }
+        OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok()
+    }
+}
+
+/// Waits up to `timeout` for a process handle to signal (exit).
+#[cfg(windows)]
+fn wait_for_handle(handle: windows::Win32::Foundation::HANDLE, timeout: Duration) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::WaitForSingleObject;
+
+    unsafe {
+        if WaitForSingleObject(handle, timeout.as_millis() as u32) == WAIT_OBJECT_0 {
+            let _ = CloseHandle(handle);
+        }
+    }
 }
 
 /// Hands this process's idle pages back to Windows.
@@ -1336,20 +1403,96 @@ struct Taskbar {
     overlay_on: Option<HICON>,
 }
 
+/// Composes the normal app icon with a red badge circle and the unread count
+/// in white digits — the messenger-style tray counter on Windows. Counts
+/// above 99 are shown as 99.
+#[cfg(windows)]
+fn unread_tray_icon(unread: u32) -> Option<tray_icon::Icon> {
+    let size = ICON_SIZE as i32;
+    let mut rgba = ICON_RGBA_32.to_vec();
+    let s = ICON_SIZE as f32;
+    let (cx, cy, r) = (s * 0.70, s * 0.70, s * 0.27);
+
+    for y in 0..size {
+        for x in 0..size {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            if d > r {
+                continue;
+            }
+            let px = if d > r - s * 0.05 {
+                (255, 255, 255, 255)
+            } else {
+                (234, 67, 53, 255)
+            };
+            let i = (y * size + x) as usize * 4;
+            rgba[i] = px.0;
+            rgba[i + 1] = px.1;
+            rgba[i + 2] = px.2;
+            rgba[i + 3] = px.3;
+        }
+    }
+
+    let text = unread.min(99).to_string();
+    let scale = 2i32;
+    let width = text.len() as i32 * 4 - 1;
+    let ox = cx as i32 - width * scale / 2 + 1;
+    let oy = cy as i32 - 5;
+    for (gi, digit) in text.bytes().enumerate() {
+        let glyph = DIGIT_GLYPHS[(digit - b'0') as usize];
+        for gy in 0..5usize {
+            for gx in 0..3usize {
+                if glyph[gy * 3 + gx] == 0 {
+                    continue;
+                }
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let px = ox + gi as i32 * 4 + gx as i32 * scale + sx;
+                        let py = oy + gy as i32 * scale + sy;
+                        if !(0..size).contains(&px) || !(0..size).contains(&py) {
+                            continue;
+                        }
+                        let i = (py * size + px) as usize * 4;
+                        rgba[i] = 255;
+                        rgba[i + 1] = 255;
+                        rgba[i + 2] = 255;
+                        rgba[i + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+
+    tray_icon::Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE).ok()
+}
+
 /// Applies the tray icon, tooltip, window title and taskbar overlay at once.
 fn apply_badge(
-    on: bool,
+    unread: u32,
     tray: &Rc<RefCell<Option<TrayIcon>>>,
     window: &Window,
     taskbar: &Taskbar,
-    icon: &tray_icon::Icon,
+    normal_icon: &tray_icon::Icon,
+    badge_icon: &tray_icon::Icon,
 ) {
     #[cfg(not(windows))]
     let _ = taskbar;
+    let on = unread > 0;
+    let icon = if unread == 0 {
+        normal_icon.clone()
+    } else {
+        #[cfg(windows)]
+        {
+            unread_tray_icon(unread).unwrap_or_else(|| badge_icon.clone())
+        }
+        #[cfg(not(windows))]
+        {
+            badge_icon.clone()
+        }
+    };
     if let Some(tray_icon) = tray.borrow().as_ref() {
-        let _ = tray_icon.set_icon(Some(icon.clone()));
-        let _ = tray_icon.set_tooltip(Some(if on {
-            format!("{APP_NAME} — new messages")
+        let _ = tray_icon.set_icon(Some(icon));
+        let _ = tray_icon.set_tooltip(Some(if unread > 0 {
+            format!("{APP_NAME} — {unread} new message{}", if unread == 1 { "" } else { "s" })
         } else {
             format!("{APP_NAME} — Google Chat")
         }));

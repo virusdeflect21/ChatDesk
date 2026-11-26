@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="media/banner.png" alt="ChatDesk" width="720">
+
 # ChatDesk
 
 **Google Chat in an app window, not a browser tab.**
@@ -8,6 +10,7 @@ A tiny native shell around [chat.google.com](https://chat.google.com) for
 **Windows, Linux and macOS** — Rust · [tao](https://docs.rs/tao) · [wry](https://docs.rs/wry).
 
 [![Release](https://img.shields.io/github/v/release/virusdeflect21/ChatDesk?sort=semver&display_name=tag&label=release&cacheSeconds=3600)](https://github.com/virusdeflect21/ChatDesk/releases/latest)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux%20%C2%B7%20macOS-0078d4)](#system-requirements)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-b7410e?logo=rust)](https://www.rust-lang.org)
@@ -20,17 +23,51 @@ A tiny native shell around [chat.google.com](https://chat.google.com) for
 
 > **Unofficial.** Not affiliated with, endorsed by or supported by Google. "Google Chat" is a trademark of Google LLC.
 
+## Screenshots
+
+| | |
+|---|---|
+| App icon | <img src="media/icon.png" width="64" alt="ChatDesk app icon"> |
+| Tray with unread badge | <img src="media/icon-badge.png" width="64" alt="ChatDesk tray icon with red unread badge"> (on Windows the red circle carries the live unread count) |
+
+The tray menu in full:
+
+```
+Show Google Chat
+────────────────
+Back
+Forward
+Reload
+Back to Chat
+────────────────
+Zoom in
+Zoom out
+Actual size
+────────────────
+✓ Start with Windows
+   Start hidden in tray
+────────────────
+Check for updates
+Reset app data
+Open in default browser
+────────────────
+Quit ChatDesk
+```
+
 ## Why ChatDesk
 
 Google killed the official Chat desktop app and pushes a browser PWA. ChatDesk gives you the web client you already use — same login, same features, works with consumer `@gmail.com` and Google Workspace accounts — but in its own window that lives in your tray, not in a Chrome tab eating 700 MB.
 
 No setup: no Google Cloud project, no OAuth client, no API keys, and no Google Chat API — it loads exactly the web client your browser would, so nothing is workspace-only. Just sign in.
 
+**Your login survives updates and reinstalls.** The session lives in the app's data directory, not next to the executable — download a new ChatDesk build, put it anywhere, run it: you are still signed in. Want a clean slate instead? Tray → **Reset app data**.
+
 ## Features
 
 ### New in v0.2.1
 - **Linux and macOS builds** — the same app now ships for Windows, Linux (X11, webkit2gtk) and macOS (WKWebView); autoboot works everywhere (`Run` key on Windows, `~/.config/autostart` on Linux, LaunchAgent on macOS).
 - **Links always open in your browser** — a plain click is enough (no modifier key): anything that isn't Chat itself — Docs, Drive, Meet, Calendar, external sites — hands off to your default browser instead of being silently blocked.
+- **Unread counter on the Windows tray icon** — a red badge circle with the actual number of unread messages (up to 99), like other messengers; the tooltip shows the exact count too.
 - **Even less RAM** — V8 heap cap 128→96 MB, disk cache 16→8 MB, idle trims 20→15 s, hidden trims 30→20 s.
 - **Off-screen window guard** — if a monitor was unplugged, the window resets to a visible position instead of restoring off-screen.
 
